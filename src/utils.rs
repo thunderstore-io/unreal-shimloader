@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use once_cell::unsync::Lazy;
 use widestring::{U16CStr, U16CString};
 use windows_sys::core::PCWSTR;
-use crate::{BP_MODS, UE4SS_MODS};
+use crate::{BP_MODS, UE4SS_MODS, CONFIG_DIR};
 
 /// Quick and dirty debug println macro. Shamelessly stolen.
 #[macro_export]
@@ -59,25 +59,30 @@ pub fn reroot_path(origin: &NormalizedPath) -> PathBuf {
         return PathBuf::from(origin);
     }
 
-    let ue4ss_mods = {
-        let exe_path = env::current_exe().unwrap();
-        NormalizedPath::new(&exe_path.join("../Mods")).0
-    };
+    let exe_path = env::current_exe().unwrap();
 
-    let bp_mods = {
-        let exe_path = env::current_exe().unwrap();
-        NormalizedPath::new(&exe_path.join("../../../Content/Paks/LogicMods")).0
-    };
+    let ue4ss_mods =
+        NormalizedPath::new(&exe_path.join("../Mods")).0;
+
+    let bp_mods =
+        NormalizedPath::new(&exe_path.join("../../../Content/Paks/LogicMods")).0;
+
+    let config_dir =
+        NormalizedPath::new(&exe_path.join("../../../Config")).0;
 
     // If the given path is a member of EITHER of these directories, re-root onto the target.
     if origin.starts_with(&ue4ss_mods) {
-        let mut stripped = PathBuf::from("Mods").join(origin.strip_prefix(&ue4ss_mods).unwrap());
+        let mut stripped = PathBuf::from(origin.strip_prefix(&ue4ss_mods).unwrap());
 
         NormalizedPath::new(&UE4SS_MODS.get().unwrap().join(stripped)).0
     } else if origin.starts_with(&bp_mods) {
-        let mut stripped = PathBuf::from("LogicMods").join(origin.strip_prefix(&bp_mods).unwrap());
+        let mut stripped = PathBuf::from(origin.strip_prefix(&bp_mods).unwrap());
 
         NormalizedPath::new(&BP_MODS.get().unwrap().join(stripped)).0
+    } else if origin.starts_with(&config_dir) {
+        let mut stripped = PathBuf::from(origin.strip_prefix(&config_dir).unwrap());
+
+        NormalizedPath::new(&CONFIG_DIR.get().unwrap().join(stripped)).0
     } else {
         origin.clone()
     }

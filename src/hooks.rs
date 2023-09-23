@@ -256,8 +256,8 @@ pub unsafe extern "system" fn ntcreatefile_detour(
     );
 
     // Leak em'
-    mem::forget(buffer);
-    mem::forget(new_unicode);
+//     mem::forget(buffer);
+//     mem::forget(new_unicode);
 
     result
 }

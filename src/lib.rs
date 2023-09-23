@@ -1,10 +1,11 @@
 #![allow(unused)]
 
-use std::{env, thread};
+use std::{env, thread, fs};
 use std::ffi::c_void;
 use std::fs::{canonicalize, File};
 use std::ops::Index;
 use std::path::{Path, PathBuf};
+use clap::Parser;
 use once_cell::sync::OnceCell;
 use toml::Value;
 use widestring::U16CString;
@@ -19,6 +20,23 @@ mod utils;
 
 static BP_MODS: OnceCell<PathBuf> = OnceCell::new();
 static UE4SS_MODS: OnceCell<PathBuf> = OnceCell::new();
+static CONFIG_DIR: OnceCell<PathBuf> = OnceCell::new();
+
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(long)]
+    ue4ss_mods: Option<PathBuf>,
+
+    #[arg(long)]
+    bp_mods: Option<PathBuf>,
+
+    #[arg(long)]
+    config_dir: Option<PathBuf>,
+
+    #[arg(long, default_value = "false")]
+    disable_mods: bool,
+}
 
 #[no_mangle]
 #[allow(non_snake_case)]
@@ -46,19 +64,51 @@ unsafe fn shim_init() {
     #[cfg(debug_assertions)]
     AllocConsole();
 
-    let mut args = env::args().collect::<Vec<_>>();
-    let ue4ss_mods = {
-        let flag_idx = args.iter().position(|x| x == "--ue4ss-mods")
-            .expect("--ue4ss-mods was not set when launching the game, bailing out.");
+    // If no args are specified then the user is NOT running virtualized. Load the game
+    // and ue4ss as usual.
+    if env::args().collect::<Vec<_>>().len() == 1 {
+        load_ue4ss();
+        return;
+    }
 
-        utils::canonicalize_but_no_prefix(&PathBuf::from(&args[flag_idx + 1]))
-    };
-    let bp_mods = {
-        let flag_idx = args.iter().position(|x| x == "--bp-mods")
-            .expect("--ue4ss-mods was not set when launching the game, bailing out.");
+    // The --mods-disabled flag explicitly disables ue4ss and bp mod loading.
+    let args = Args::parse();
+    if args.disable_mods {
+        return;
+    }
 
-        utils::canonicalize_but_no_prefix(&PathBuf::from(&args[flag_idx + 1]))
+    // Validation to ensure that the Content/Paks/LogicMods directory exists in the game directory.
+    // This is really janky to do in DllMain. Oh well!
+    let logicmods_dir = {
+        let current_exe = env::current_exe().unwrap();
+        current_exe
+            .ancestors()
+            .nth(3)
+            .unwrap()
+            .join("Content\\Paks\\LogicMods\\")
     };
+
+    if !logicmods_dir.is_dir() {
+        fs::create_dir_all(&logicmods_dir);
+    }
+
+    // Create the Config directory in the game, if it doesn't already exist.
+    let real_config_dir = {
+        let current_exe = env::current_exe().unwrap();
+        current_exe
+            .ancestors()
+            .nth(3)
+            .unwrap()
+            .join("Config\\")
+    };
+
+    if !real_config_dir.is_dir() {
+        fs::create_dir_all(real_config_dir);
+    }
+
+    let ue4ss_mods = utils::canonicalize_but_no_prefix(&args.ue4ss_mods.unwrap());
+    let bp_mods = utils::canonicalize_but_no_prefix(&args.bp_mods.unwrap());
+    let config_dir = utils::canonicalize_but_no_prefix(&args.config_dir.unwrap());
 
     std::panic::set_hook(Box::new(|x| unsafe {
         let message = {
@@ -81,9 +131,14 @@ unsafe fn shim_init() {
 
     BP_MODS.set(bp_mods);
     UE4SS_MODS.set(ue4ss_mods);
+    CONFIG_DIR.set(config_dir);
 
     hooks::enable_hooks().unwrap();
 
+    load_ue4ss();
+}
+
+unsafe fn load_ue4ss() {
     let ue4ss_dll = env::current_exe().unwrap().join("../ue4ss.dll");
     let wide_path = U16CString::from_str(ue4ss_dll.to_str().unwrap()).unwrap();
 
