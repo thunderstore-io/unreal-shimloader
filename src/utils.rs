@@ -48,8 +48,8 @@ pub fn canonicalize_but_no_prefix(path: &Path) -> PathBuf {
 
 /// Re-root the origin path onto the virtualized path, if applicable.
 /// If the origin path will ONLY BE re-rooted if is a member of the following dirs:
-/// - VotV/Binaries/Win64/Mods/
-/// - VotV/Content/Paks/LogicMods/
+/// - GAME/Binaries/Win64/Mods/
+/// - GAME/Content/Paks/LogicMods/
 pub fn reroot_path(origin: &NormalizedPath) -> PathBuf {
     let origin = &origin.0;
 

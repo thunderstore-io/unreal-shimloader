@@ -22,9 +22,11 @@ static BP_MODS: OnceCell<PathBuf> = OnceCell::new();
 static UE4SS_MODS: OnceCell<PathBuf> = OnceCell::new();
 static CONFIG_DIR: OnceCell<PathBuf> = OnceCell::new();
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    _args: Vec<String>,
+
     #[arg(long)]
     ue4ss_mods: Option<PathBuf>,
 
@@ -64,6 +66,22 @@ unsafe fn shim_init() {
     #[cfg(debug_assertions)]
     AllocConsole();
 
+    std::panic::set_hook(Box::new(|x| unsafe {
+        let message = {
+            let message = format!("unreal-shimloader has crashed: \n\n{}", x);
+
+            U16CString::from_str(&message)
+        }.unwrap();
+
+        MessageBoxW(
+            0,
+            message.as_ptr(),
+            w!("unreal-shimloader"),
+            0
+        );
+    }));
+
+
     // If no args are specified then the user is NOT running virtualized. Load the game
     // and ue4ss as usual.
     if env::args().collect::<Vec<_>>().len() == 1 {
@@ -73,6 +91,7 @@ unsafe fn shim_init() {
 
     // The --mods-disabled flag explicitly disables ue4ss and bp mod loading.
     let args = Args::parse();
+
     if args.disable_mods {
         return;
     }
@@ -110,22 +129,9 @@ unsafe fn shim_init() {
     let bp_mods = utils::canonicalize_but_no_prefix(&args.bp_mods.unwrap());
     let config_dir = utils::canonicalize_but_no_prefix(&args.config_dir.unwrap());
 
-    std::panic::set_hook(Box::new(|x| unsafe {
-        let message = {
-            let message = format!("votv-shimloader has crashed: \n\n{}", x);
+    let ue4ss_dll = env::current_exe().unwrap().join("../ue4ss.dll");
 
-            U16CString::from_str(&message)
-        }.unwrap();
-
-        MessageBoxW(
-            0,
-            message.as_ptr(),
-            w!("votv-shimloader"),
-            0
-        );
-    }));
-
-    if !Path::new("ue4ss.dll").is_file() {
+    if !ue4ss_dll.is_file() {
         panic!("ue4ss.dll could not be found in {:?}", env::current_dir().unwrap());
     }
 

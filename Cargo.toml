@@ -1,5 +1,5 @@
 [package]
-name = "votv-shimloader"
+name = "unreal-shimloader"
 version = "0.1.0"
 edition = "2021"
 
