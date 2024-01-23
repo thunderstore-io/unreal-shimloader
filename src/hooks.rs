@@ -187,14 +187,15 @@ pub unsafe extern "system" fn ntcreatefile_detour(
     let og_prefix = slice::from_raw_parts(unicode_path.Buffer, 4);
     let offset_path = unicode_path.Buffer.add(4);
 
-    let original_path_str = U16CStr::from_ptr(offset_path, path_len - 4).unwrap();
+    let original_path_str = U16CStr::from_ptr(offset_path, path_len - 4)
+        .expect("Failed to create U16CStr from raw unicode buffer.");
 
     let bad_path_prefixes = ["\\\\device", "c:\\windows"];
-    if bad_path_prefixes.iter().find(|x| {
+    if bad_path_prefixes.iter().any(|x| {
         let lowercase = original_path_str.to_string().unwrap().to_lowercase();
 
         lowercase.starts_with(&x.to_lowercase())
-    }).is_some() {
+    }) {
         return NtCreateFile_Detour.call(
             file_handle,
             desired_access,
@@ -221,7 +222,7 @@ pub unsafe extern "system" fn ntcreatefile_detour(
     let new_path_size = (wide_new_path.len() * 2) + 8;
 
     let buffer_layout = Layout::array::<u16>(og_prefix.len() + wide_new_path.len() + 1).unwrap();
-    let buffer = alloc::alloc_zeroed(buffer_layout) as *mut u16;
+    let buffer = alloc::alloc_zeroed(buffer_layout).cast::<u16>();
 
     // The length of the buffer in bytes.
     let used_size = (og_prefix.len() + wide_new_path.len()) * 2;
@@ -236,12 +237,10 @@ pub unsafe extern "system" fn ntcreatefile_detour(
         Buffer: buffer,
     };
 
-    drop(*(*object_attrs).ObjectName);
-
-    (*object_attrs).ObjectName = &mut new_unicode as *mut _;
+    (*object_attrs).ObjectName = ptr::addr_of_mut!(new_unicode);
 
     // Call NtCreateFile now, we need to do some forgettin' before we can be done.
-    let result = NtCreateFile_Detour.call(
+    NtCreateFile_Detour.call(
         file_handle,
         desired_access,
         object_attrs,
@@ -253,13 +252,7 @@ pub unsafe extern "system" fn ntcreatefile_detour(
         create_options,
         ea_buffer,
         ea_length
-    );
-
-    // Leak em'
-//     mem::forget(buffer);
-//     mem::forget(new_unicode);
-
-    result
+    )
 }
 
 unsafe extern "system" fn getfileattributesw_detour(
@@ -308,7 +301,7 @@ unsafe extern "system" fn getfileattributesexw_detour(
         file_information
     );
 
-    let test = *(file_information as *mut usize as *mut WIN32_FIND_DATAW);
+    let test = *file_information.cast::<usize>().cast::<WIN32_FIND_DATAW>();
     debug_println!("{:?}", U16CStr::from_ptr_str(test.cFileName.as_ptr()));
     debug_println!("-> {}", result);
 
@@ -317,7 +310,7 @@ unsafe extern "system" fn getfileattributesexw_detour(
         debug_println!("ERROR: {:#?}", error);
     }
 
-    return result;
+    result
 }
 
 unsafe extern "system" fn findfirstfilew_detour(

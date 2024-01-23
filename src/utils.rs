@@ -29,18 +29,25 @@ impl Debug for NormalizedPath {
     }
 }
 
-/// Convert a raw PCWSTR *const u16 ptr to a normalized PathBuf.
+/// Convert a raw PCWSTR *const u16 ptr to a normalized `PathBuf`.
 pub fn pcwstr_to_path(pcwstr: PCWSTR) -> NormalizedPath {
     let as_string = unsafe {
         U16CStr::from_ptr_str(pcwstr)
-    }.to_string().unwrap();
+    }
+    .to_string()
+    .unwrap();
 
     let path = PathBuf::from(as_string);
     NormalizedPath::new(&path)
 }
 
 pub fn canonicalize_but_no_prefix(path: &Path) -> PathBuf {
-    let can = path.canonicalize().unwrap();
+    let can = path.canonicalize()
+        .unwrap_or_else(|path| 
+            panic!("
+                Attempted to canonicalize the path '{path:?}', but failed. 
+                This could be caused by the path not pointing to something that actually exists.
+            "));
     let as_str = can.to_str().unwrap().to_string().replace(r#"\\?\"#, "");
 
     PathBuf::from(as_str)
@@ -92,7 +99,5 @@ pub fn reroot_path(origin: &NormalizedPath) -> PathBuf {
 /// u16 unicode chars.
 pub fn path_to_widestring(path: &Path) -> U16CString {
     let path_str = path.as_os_str().to_str().unwrap();
-    let wide_string = U16CString::from_str(path_str).unwrap();
-
-    wide_string
+    U16CString::from_str(path_str).unwrap()
 }
