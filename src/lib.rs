@@ -30,7 +30,8 @@ static CONFIG_DIR: OnceCell<PathBuf> = OnceCell::new();
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    _args: Vec<String>,
+    #[arg(hide = true)]
+    other: Vec<String>,
 
     #[arg(long)]
     ue4ss_mods: Option<PathBuf>,
@@ -79,15 +80,18 @@ unsafe fn shim_init() {
     let current_exe = env::current_exe()
         .expect("Failed to get the path of the currently running executable.");
 
+
+    // The --mods-disabled flag explicitly disables ue4ss and bp mod loading.
+    let args = Args::parse();
+
     // If no args are specified then the user is NOT running virtualized. Load the game
     // and ue4ss as usual.
-    if env::args().collect::<Vec<_>>().len() == 1 {
+    let argc = env::args().collect::<Vec<_>>().len();
+    if argc - args.other.len() == 1 {
         load_ue4ss(&current_exe);
         return;
     }
 
-    // The --mods-disabled flag explicitly disables ue4ss and bp mod loading.
-    let args = Args::parse();
     if args.disable_mods {
         return;
     }
