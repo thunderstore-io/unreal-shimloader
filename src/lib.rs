@@ -10,8 +10,9 @@ use std::fs::{canonicalize, File};
 use std::ops::Index;
 use std::path::{Path, PathBuf};
 use clap::Parser;
-use once_cell::sync::OnceCell;
+use once_cell::sync::{Lazy, OnceCell};
 use toml::Value;
+use utils::NormalizedPath;
 use widestring::U16CString;
 use windows_sys::w;
 use windows_sys::Win32::Foundation::{BOOL, HWND, TRUE};
@@ -26,6 +27,24 @@ mod utils;
 static BP_MODS: OnceCell<PathBuf> = OnceCell::new();
 static UE4SS_MODS: OnceCell<PathBuf> = OnceCell::new();
 static CONFIG_DIR: OnceCell<PathBuf> = OnceCell::new();
+
+static GAME_ROOT: Lazy<PathBuf> = Lazy::new(|| {
+    let current_exe = env::current_exe().unwrap();
+    current_exe
+        .ancestors()
+        .nth(3)
+        .unwrap_or_else(|| 
+            panic!("The executable at {current_exe:?} is not contained within a valid UE directory structure."))
+        .to_path_buf()
+});
+
+static EXE_DIR: Lazy<PathBuf> = Lazy::new(|| {
+    env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
+});
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -79,9 +98,20 @@ unsafe fn shim_init() {
 
     let current_exe = env::current_exe()
         .expect("Failed to get the path of the currently running executable.");
+    let exe_dir = current_exe.parent().unwrap();
 
+    // Ensure that UE4SS is not installed via xinput1_3.dll
+    let xinput_path = exe_dir.join("xinput1_3.dll");
+    if xinput_path.exists() {
+        panic!(
+            "Shimloader is not compatible with the xinput1_3.dll UE4SS binary.\n
+            1. Remove the file at {:?} \n
+            2. Ensure that ue4ss.dll exists within {:?} \n
+            3. Run the game again.",
+            xinput_path, exe_dir
+        );
+    }
 
-    // The --mods-disabled flag explicitly disables ue4ss and bp mod loading.
     let args = Args::parse();
 
     // If no args are specified then the user is NOT running virtualized. Load the game
@@ -120,10 +150,15 @@ unsafe fn shim_init() {
         fs::create_dir_all(real_config_dir);
     }
 
-    let ue4ss_mods = utils::canonicalize_but_no_prefix(&args.ue4ss_mods.unwrap());
-    let bp_mods = utils::canonicalize_but_no_prefix(&args.bp_mods.unwrap());
-    let config_dir = utils::canonicalize_but_no_prefix(&args.config_dir.unwrap());
+    // Create the ue4ss_mods and bp_mods directories if they don't already exist.
+    let ue4ss_mods = utils::normalize_path(&args.ue4ss_mods.unwrap());
+    let bp_mods = utils::normalize_path(&args.bp_mods.unwrap());
+    let config_dir = utils::normalize_path(&args.config_dir.unwrap());
 
+    for dir in [&ue4ss_mods, &bp_mods, &config_dir] {
+        fs::create_dir_all(&dir);
+    }
+    
     BP_MODS.set(bp_mods);
     UE4SS_MODS.set(ue4ss_mods);
     CONFIG_DIR.set(config_dir);

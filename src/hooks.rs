@@ -143,17 +143,13 @@ pub unsafe extern "system" fn createfilew_detour(
     template_file: HANDLE,
 ) -> HANDLE {
     let path = utils::pcwstr_to_path(raw_file_name);
-    let new_path = utils::reroot_path(&path);
+    let new_path = utils::reroot_path(&path).unwrap_or(path.0.clone());
 
     debug_println!("[createfilew_detour] {:?} to {:?}", path, new_path);
 
     let wide_path = utils::path_to_widestring(&new_path);
 
-    let raw_path = if path.0 == new_path {
-        raw_file_name
-    } else {
-        wide_path.as_ptr()
-    };
+    let raw_path = wide_path.as_ptr();
 
     CreateFileW_Detour.call(
         raw_path,
@@ -212,7 +208,8 @@ pub unsafe extern "system" fn ntcreatefile_detour(
     };
 
     let original_path = PathBuf::from(original_path_str.to_string().unwrap());
-    let new_path = utils::reroot_path(&NormalizedPath::new(&original_path));
+    let new_path = NormalizedPath::new(&original_path);
+    let new_path = utils::reroot_path(&new_path).unwrap_or(new_path.0);
 
     debug_println!("[ntcreatefile_detour] {:?} to {:?}", original_path, new_path);
 
@@ -259,7 +256,7 @@ unsafe extern "system" fn getfileattributesw_detour(
     raw_file_name: PCWSTR,
 ) -> u32 {
     let path = utils::pcwstr_to_path(raw_file_name);
-    let new_path = utils::reroot_path(&path);
+    let new_path = utils::reroot_path(&path).unwrap_or(path.0.clone());
 
     debug_println!("[getfileattributesw_detour] {:?} to {:?}", path, new_path);
 
@@ -283,7 +280,7 @@ unsafe extern "system" fn getfileattributesexw_detour(
 ) -> BOOL {
     let before = U16CStr::from_ptr_str(raw_file_name);
     let path = utils::pcwstr_to_path(raw_file_name);
-    let new_path = utils::reroot_path(&path);
+    let new_path = utils::reroot_path(&path).unwrap_or(path.0.clone());
 
     debug_println!("[getfileattributesexw_detour] {:?} to {:?}", path, new_path);
 
@@ -318,7 +315,7 @@ unsafe extern "system" fn findfirstfilew_detour(
     find_file_data: *mut WIN32_FIND_DATAW,
 ) -> FindFileHandle {
     let path = utils::pcwstr_to_path(raw_file_name);
-    let new_path = utils::reroot_path(&path);
+    let new_path = utils::reroot_path(&path).unwrap_or(path.0.clone());
 
     debug_println!("[findfirstfilew_detour] {:?} to {:?}", path, new_path);
 
@@ -345,17 +342,13 @@ unsafe extern "system" fn findfirstfileexw_detour(
     additional_flags: FIND_FIRST_EX_FLAGS
 ) -> FindFileHandle {
     let path = utils::pcwstr_to_path(raw_file_name);
-    let new_path = utils::reroot_path(&path);
+    let new_path = utils::reroot_path(&path).unwrap_or(path.0.clone());
 
     debug_println!("[findfirstfileexw_detour] {:?} to {:?}", path, new_path);
 
     let wide_path = utils::path_to_widestring(&new_path);
 
-    let raw_path = if path.0 == new_path {
-        raw_file_name
-    } else {
-        wide_path.as_ptr()
-    };
+    let raw_path = wide_path.as_ptr();
 
     FindFirstFileExW_Detour.call(
         raw_path,
