@@ -79,15 +79,13 @@ pub fn reroot_path(origin: &NormalizedPath) -> Option<PathBuf> {
         path_clean::clean(EXE_DIR
             .join("..")
             .join("..")
-            .join("..")
             .join("Content")
             .join("Paks")
-            .join("LogicMods"))
-            .to_path_buf()
+            .join("LogicMods")
+            .to_path_buf())
     });
     let config_dir: Lazy<PathBuf> = Lazy::new(|| {
         path_clean::clean(EXE_DIR
-            .join("..") 
             .join("..")
             .join("..")
             .join("Config"))
