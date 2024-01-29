@@ -4,15 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "dxgi"
+name = "dwmapi"
 crate-type = ["cdylib"]
 
 [dependencies]
 once_cell = "1.18.0"
 widestring = "1.0.2"
 path-clean = "1.0.1"
-toml = "0.8.0"
-clap = { version = "4.4.4", features = ["derive"] }
+getargs = "0.5.0"
 
 [dependencies.retour]
 version = "0.4.0-alpha.1"
@@ -28,6 +27,8 @@ features = [
     "Win32_System_SystemServices",
     "Win32_System_LibraryLoader",
     "Win32_System_WindowsProgramming",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_Debug",
     "Win32_UI_WindowsAndMessaging",
 ]
 
