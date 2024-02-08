@@ -4,13 +4,17 @@
     clippy::unwrap_used,
 )]
 
+use std::{env, thread, fs};
+use std::io::Write;
 use std::alloc::GlobalAlloc;
 use std::collections::HashMap;
-use std::{env, thread, fs};
 use std::ffi::c_void;
 use std::fs::{canonicalize, File};
 use std::ops::Index;
 use std::path::{Path, PathBuf};
+
+use chrono::Local;
+use log::{debug, error, LevelFilter};
 use getargs::{Arg, Opt, Options};
 use once_cell::sync::{Lazy, OnceCell};
 use utils::NormalizedPath;
@@ -70,8 +74,10 @@ unsafe fn shim_init() {
     AllocConsole();
 
     std::panic::set_hook(Box::new(|x| unsafe {
-        let message = U16CString::from_str(format!("unreal-shimloader has crashed: \n\n{}", x));
+        let message = format!("unreal-shimloader has crashed: \n\n{x}");
+        error!("{message}");
 
+        let message = U16CString::from_str(message);
         MessageBoxW(
             0,
             message.unwrap().as_ptr(),
@@ -83,6 +89,28 @@ unsafe fn shim_init() {
     let current_exe = env::current_exe()
         .expect("Failed to get the path of the currently running executable.");
     let exe_dir = current_exe.parent().unwrap();
+ 
+    let mut target = Box::new(File::create(exe_dir.join("shimloader-log.txt")).expect("Failed to create log file."));
+    env_logger::Builder::new()
+        .target(env_logger::Target::Pipe(target))
+        .filter(None, LevelFilter::Debug)
+        .format(|buf, record| {
+            writeln!(
+                buf,
+                "[{} {} {}:{}] {}",
+                Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+                record.level(),
+                record.file().unwrap_or("unknown"),
+                record.line().unwrap_or(0),
+                record.args()
+            )
+        })
+        .init();
+
+    debug!("unreal_shimloader -- start");
+    debug!("current directory: {exe_dir:?}");
+    debug!("current executable: {current_exe:?}");
+    debug!("args: {:?}", env::args().collect::<Vec<_>>());
 
     // Ensure that UE4SS is not installed via xinput1_3.dll
     let xinput_path = exe_dir.join("xinput1_3.dll");
@@ -105,7 +133,7 @@ unsafe fn shim_init() {
     while let Some(opt) = opts.next_arg().expect("Failed to parse arguments") {
         match opt {
             Arg::Long("disable-mods") => disable_mods = true,
-            Arg::Long("lua-dir") => lua_dir = Some(PathBuf::from(opts.value().expect("`--lua-dir` argument has no value."))),
+            Arg::Long("mod-dir") => lua_dir = Some(PathBuf::from(opts.value().expect("`--mod-dir` argument has no value."))),
             Arg::Long("pak-dir") => pak_dir = Some(PathBuf::from(opts.value().expect("`--pak-dir` argument has no value."))),
             Arg::Long("cfg-dir") => cfg_dir = Some(PathBuf::from(opts.value().expect("`--cfg-dir` argument has no value."))),
             _ => (),
