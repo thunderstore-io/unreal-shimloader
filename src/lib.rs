@@ -4,13 +4,17 @@
     clippy::unwrap_used,
 )]
 
-use std::collections::HashMap;
 use std::{env, thread, fs};
+use std::io::Write;
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fs::{canonicalize, File};
 use std::ops::Index;
 use std::path::{Path, PathBuf};
+
+use chrono::Local;
 use getargs::{Arg, Opt, Options};
+use log::{debug, LevelFilter};
 use once_cell::sync::{Lazy, OnceCell};
 use utils::NormalizedPath;
 use widestring::U16CString;
@@ -83,6 +87,28 @@ unsafe fn shim_init() {
         .expect("Failed to get the path of the currently running executable.");
     let exe_dir = current_exe.parent().unwrap();
 
+    let mut target = Box::new(File::create(exe_dir.join("shimloader-log.txt")).expect("Failed to create log file."));
+    env_logger::Builder::new()
+        .target(env_logger::Target::Pipe(target))
+        .filter(None, LevelFilter::Debug)
+        .format(|buf, record| {
+            writeln!(
+                buf,
+                "[{} {} {}:{}] {}",
+                Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+                record.level(),
+                record.file().unwrap_or("unknown"),
+                record.line().unwrap_or(0),
+                record.args()
+            )
+        })
+        .init();
+
+    debug!("unreal_shimloader -- start");
+    debug!("current directory: {exe_dir:?}");
+    debug!("current executable: {current_exe:?}");
+    debug!("args: {:?}", env::args().collect::<Vec<_>>());
+
     // Ensure that UE4SS is not installed via xinput1_3.dll
     let xinput_path = exe_dir.join("xinput1_3.dll");
     assert!(
@@ -104,7 +130,7 @@ unsafe fn shim_init() {
     while let Some(opt) = opts.next_arg().expect("Failed to parse arguments") {
         match opt {
             Arg::Long("disable-mods") => disable_mods = true,
-            Arg::Long("lua-dir") => lua_dir = Some(PathBuf::from(opts.value().expect("`--lua-dir` argument has no value."))),
+            Arg::Long("mod-dir") => lua_dir = Some(PathBuf::from(opts.value().expect("`--mod-dir` argument has no value."))),
             Arg::Long("pak-dir") => pak_dir = Some(PathBuf::from(opts.value().expect("`--pak-dir` argument has no value."))),
             Arg::Long("cfg-dir") => cfg_dir = Some(PathBuf::from(opts.value().expect("`--cfg-dir` argument has no value."))),
             _ => (),
@@ -118,6 +144,7 @@ unsafe fn shim_init() {
     // If no args are specified then the user is NOT running virtualized. Load the game
     // and ue4ss as usual.
     if !disable_mods && ![&lua_dir, &pak_dir, &cfg_dir].iter().any(|x| Option::is_some(x)) {
+        debug!("running with mods disabled");
         load_ue4ss(&current_exe);
         return;
     }

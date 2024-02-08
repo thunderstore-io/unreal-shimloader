@@ -5,6 +5,8 @@ use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
+
+use log::debug;
 use once_cell::sync::Lazy;
 use retour::static_detour;
 use widestring::{U16CStr, WideString};
@@ -34,7 +36,7 @@ use windows_sys::Win32::System::WindowsProgramming::{
     IO_STATUS_BLOCK_0,
     OBJECT_ATTRIBUTES
 };
-use crate::{debug_println, utils};
+use crate::utils;
 use crate::utils::NormalizedPath;
 
 static_detour! {
@@ -145,7 +147,7 @@ pub unsafe extern "system" fn createfilew_detour(
     let path = utils::pcwstr_to_path(raw_file_name);
     let new_path = utils::reroot_path(&path).unwrap_or(path.0.clone());
 
-    debug_println!("[createfilew_detour] {:?} to {:?}", path, new_path);
+    debug!("[createfilew_detour] {:?} to {:?}", path, new_path);
 
     let wide_path = utils::path_to_widestring(&new_path);
 
@@ -211,7 +213,7 @@ pub unsafe extern "system" fn ntcreatefile_detour(
     let new_path = NormalizedPath::new(&original_path);
     let new_path = utils::reroot_path(&new_path).unwrap_or(new_path.0);
 
-    debug_println!("[ntcreatefile_detour] {:?} to {:?}", original_path, new_path);
+    debug!("[ntcreatefile_detour] {:?} to {:?}", original_path, new_path);
 
     // Update the Length property in the UNICODE_STRING struct with the new length of the path.
     // (+ convert the new path back into a raw widestring and copy it into the buffer.)
@@ -258,7 +260,7 @@ unsafe extern "system" fn getfileattributesw_detour(
     let path = utils::pcwstr_to_path(raw_file_name);
     let new_path = utils::reroot_path(&path).unwrap_or(path.0.clone());
 
-    debug_println!("[getfileattributesw_detour] {:?} to {:?}", path, new_path);
+    debug!("[getfileattributesw_detour] {:?} to {:?}", path, new_path);
 
     let wide_path = utils::path_to_widestring(&new_path);
 
@@ -282,7 +284,7 @@ unsafe extern "system" fn getfileattributesexw_detour(
     let path = utils::pcwstr_to_path(raw_file_name);
     let new_path = utils::reroot_path(&path).unwrap_or(path.0.clone());
 
-    debug_println!("[getfileattributesexw_detour] {:?} to {:?}", path, new_path);
+    debug!("[getfileattributesexw_detour] {:?} to {:?}", path, new_path);
 
     let wide_path = utils::path_to_widestring(&new_path);
 
@@ -299,12 +301,12 @@ unsafe extern "system" fn getfileattributesexw_detour(
     );
 
     let test = *file_information.cast::<usize>().cast::<WIN32_FIND_DATAW>();
-    debug_println!("{:?}", U16CStr::from_ptr_str(test.cFileName.as_ptr()));
-    debug_println!("-> {}", result);
+    debug!("{:?}", U16CStr::from_ptr_str(test.cFileName.as_ptr()));
+    debug!("-> {}", result);
 
     if result == 0 {
         let error = GetLastError();
-        debug_println!("ERROR: {:#?}", error);
+        debug!("ERROR: {:#?}", error);
     }
 
     result
@@ -317,7 +319,7 @@ unsafe extern "system" fn findfirstfilew_detour(
     let path = utils::pcwstr_to_path(raw_file_name);
     let new_path = utils::reroot_path(&path).unwrap_or(path.0.clone());
 
-    debug_println!("[findfirstfilew_detour] {:?} to {:?}", path, new_path);
+    debug!("[findfirstfilew_detour] {:?} to {:?}", path, new_path);
 
     let wide_path = utils::path_to_widestring(&new_path);
 
@@ -344,7 +346,7 @@ unsafe extern "system" fn findfirstfileexw_detour(
     let path = utils::pcwstr_to_path(raw_file_name);
     let new_path = utils::reroot_path(&path).unwrap_or(path.0.clone());
 
-    debug_println!("[findfirstfileexw_detour] {:?} to {:?}", path, new_path);
+    debug!("[findfirstfileexw_detour] {:?} to {:?}", path, new_path);
 
     let wide_path = utils::path_to_widestring(&new_path);
 
