@@ -30,7 +30,6 @@ mod utils;
 static BP_MODS: OnceCell<PathBuf> = OnceCell::new();
 static UE4SS_MODS: OnceCell<PathBuf> = OnceCell::new();
 static CONFIG_DIR: OnceCell<PathBuf> = OnceCell::new();
-static UE4SS_MOD_DIRS: OnceCell<Vec<String>> = OnceCell::new();
 
 static GAME_ROOT: Lazy<PathBuf> = Lazy::new(|| {
     let current_exe = env::current_exe().unwrap();
@@ -157,17 +156,6 @@ unsafe fn shim_init() {
         fs::create_dir_all(dir);
     }
     
-    // HACK: Initialize UE4SS mods dir FindFile state BEFORE we install hooks.
-    UE4SS_MOD_DIRS.set({
-        fs::read_dir(&ue4ss_mods)
-            .unwrap()
-            .filter_map(|x| x.ok())
-            .map(|x| x.path())
-            .filter(|x| x.is_dir())
-            .map(|x| x.to_str().unwrap().to_string())
-            .collect::<Vec<_>>()
-    });
-
     BP_MODS.set(bp_mods);
     UE4SS_MODS.set(ue4ss_mods);
     CONFIG_DIR.set(config_dir);

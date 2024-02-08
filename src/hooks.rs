@@ -11,7 +11,17 @@ use retour::static_detour;
 use widestring::{U16CStr, U16CString, WideString};
 use windows_sys::core::PCWSTR;
 use windows_sys::w;
-use windows_sys::Win32::Foundation::{GetLastError, SetLastError, BOOL, ERROR_NO_MORE_FILES, FILETIME, HANDLE, MAX_PATH, NTSTATUS, UNICODE_STRING};
+use windows_sys::Win32::Foundation::{
+    GetLastError, 
+    SetLastError, 
+    BOOL, 
+    ERROR_NO_MORE_FILES, 
+    FILETIME, 
+    HANDLE, 
+    MAX_PATH, 
+    NTSTATUS, 
+    UNICODE_STRING
+};
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FindClose, FindFileHandle, FindFirstFileExW, FindFirstFileW, FindNextFileW, GetFileAttributesExW, GetFileAttributesW, NtCreateFile, FILE_ATTRIBUTE_DIRECTORY, FILE_CREATION_DISPOSITION, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE, FINDEX_INFO_LEVELS, FINDEX_SEARCH_OPS, FIND_FIRST_EX_FLAGS, GET_FILEEX_INFO_LEVELS, NT_CREATE_FILE_DISPOSITION, WIN32_FIND_DATAW
@@ -23,8 +33,6 @@ use windows_sys::Win32::System::WindowsProgramming::{
 };
 use crate::{debug_println, utils, UE4SS_MOD_DIRS};
 use crate::utils::NormalizedPath;
-
-static mut FF_STATE: Lazy<HashMap<FindFileHandle, usize>> = Lazy::new(HashMap::new);
 
 static_detour! {
     pub static CreateFileW_Detour: unsafe extern "system" fn(
@@ -125,12 +133,6 @@ pub unsafe fn enable_hooks() -> Result<(), Box<dyn Error>> {
     FindFirstFileExW_Detour.initialize(FindFirstFileExW, |a, b, c, d, e, f| unsafe {
         findfirstfileexw_detour(a, b, c, d, e, f)
     })?.enable()?;
-
-    FindNextFileW_Detour.initialize(FindNextFileW, |a, b| unsafe {
-        findnextfilew_detour(a, b)
-    })?.enable()?;
-
-    FindClose_Detour.initialize(FindClose, |a| findclose_detour(a))?.enable()?;
 
     Ok(())
 }
@@ -343,19 +345,6 @@ unsafe extern "system" fn findfirstfileexw_detour(
     search_filter: *const c_void,
     additional_flags: FIND_FIRST_EX_FLAGS
 ) -> FindFileHandle {
-    // HACK: Specifically enable virtualization on the Binaries/Win64/Mods/ directory, * to search.
-    let raw_slice = U16CStr::from_ptr_str(raw_file_name).as_slice();
-    let suffix = U16CStr::from_ptr_str(w!("Win64\\Mods\\*")).as_slice();
-
-    // If the suffix ends the path then the path needs to be virtualized.
-    if raw_slice.ends_with(suffix) {
-        let fake_handle = 0x7F + FF_STATE.len() as isize;
-        FF_STATE.insert(fake_handle as _, 0);
-
-        findnextfilew_detour(fake_handle, find_file_data as *mut _);
-        return fake_handle;
-    }
-    
     let path = utils::pcwstr_to_path(raw_file_name);
     let new_path = utils::reroot_path(&path).unwrap_or(path.0.clone());
 
@@ -373,68 +362,4 @@ unsafe extern "system" fn findfirstfileexw_detour(
         search_filter,
         additional_flags
     )
-}
-
-unsafe extern "system" fn findnextfilew_detour(
-    handle: FindFileHandle,
-    data: *mut WIN32_FIND_DATAW,
-) -> BOOL {
-    if !FF_STATE.contains_key(&handle) {
-        return FindNextFileW(handle, data);
-    }
-
-    debug_println!("HIT");
-
-    let ff_index = FF_STATE.get(&handle).unwrap();
-    let mod_dirs = UE4SS_MOD_DIRS.get().unwrap();
-
-    if *ff_index >= mod_dirs.len() {
-        SetLastError(ERROR_NO_MORE_FILES);
-        return 0;
-    }
-
-    let next_path = UE4SS_MOD_DIRS
-        .get()
-        .unwrap()
-        .get(*ff_index)
-        .unwrap();
-    let raw = U16CString::from_str(&next_path).unwrap();
-    let raw = raw.as_slice_with_nul();
-    
-    let mut new_filename = [0_u16; MAX_PATH as _];
-
-    // Jankily copy the path into the buffer, up to 260 chars.
-    new_filename[..raw.len()].copy_from_slice(raw);
-
-    println!("{:?}", next_path);
-
-    let dummy_filetime = FILETIME {
-        dwLowDateTime: 0,
-        dwHighDateTime: 0,
-    };
-    
-    *data = WIN32_FIND_DATAW {
-        dwFileAttributes: FILE_ATTRIBUTE_DIRECTORY,
-        ftCreationTime: dummy_filetime,
-        ftLastAccessTime: dummy_filetime,
-        ftLastWriteTime: dummy_filetime,
-        nFileSizeHigh: 0,
-        nFileSizeLow: 0,
-        dwReserved0: 0,
-        dwReserved1: 0,
-        cFileName: new_filename,
-        cAlternateFileName: [0u16; 14],
-    };
-
-    debug_println!("done!");
-    1
-}
-
-unsafe extern "system" fn findclose_detour(handle: HANDLE) -> BOOL {
-    if FF_STATE.contains_key(&handle) {
-        FF_STATE.remove(&handle);
-        return 1;
-    }
-
-    FindClose_Detour.call(handle)
 }
