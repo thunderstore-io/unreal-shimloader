@@ -125,14 +125,12 @@ unsafe fn shim_init() {
     let args = env::args().skip(1).collect::<Vec<_>>();
     let mut opts = Options::new(args.iter().map(String::as_str));
 
-    let mut disable_mods = false;
     let mut lua_dir: Option<PathBuf> = None;
     let mut pak_dir: Option<PathBuf> = None;
     let mut cfg_dir: Option<PathBuf> = None;
 
     while let Some(opt) = opts.next_arg().expect("Failed to parse arguments") {
         match opt {
-            Arg::Long("disable-mods") => disable_mods = true,
             Arg::Long("mod-dir") => lua_dir = Some(PathBuf::from(opts.value().expect("`--mod-dir` argument has no value."))),
             Arg::Long("pak-dir") => pak_dir = Some(PathBuf::from(opts.value().expect("`--pak-dir` argument has no value."))),
             Arg::Long("cfg-dir") => cfg_dir = Some(PathBuf::from(opts.value().expect("`--cfg-dir` argument has no value."))),
@@ -140,14 +138,9 @@ unsafe fn shim_init() {
         }
     }
 
-    if disable_mods {
-        return;
-    }
-
-    // If no args are specified then the user is NOT running virtualized. Load the game
-    // and ue4ss as usual.
-    if !disable_mods && ![&lua_dir, &pak_dir, &cfg_dir].iter().any(|x| Option::is_some(x)) {
-        load_ue4ss(&current_exe);
+    // If no args are specified then we start the game with ue4ss and mods disabled.
+    let run_vanilla = [&lua_dir, &pak_dir, &cfg_dir].iter().any(|x| x.is_some());
+    if run_vanilla {
         return;
     }
 
