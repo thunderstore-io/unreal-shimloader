@@ -139,7 +139,7 @@ unsafe fn shim_init() {
     }
 
     // If no args are specified then we start the game with ue4ss and mods disabled.
-    let run_vanilla = [&lua_dir, &pak_dir, &cfg_dir].iter().any(|x| x.is_some());
+    let run_vanilla = ![&lua_dir, &pak_dir, &cfg_dir].iter().any(|x| x.is_some());
     if run_vanilla {
         return;
     }
