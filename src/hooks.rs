@@ -22,7 +22,8 @@ use windows_sys::Win32::Foundation::{
     HANDLE, 
     MAX_PATH, 
     NTSTATUS, 
-    UNICODE_STRING
+    UNICODE_STRING,
+    HMODULE
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
