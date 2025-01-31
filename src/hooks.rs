@@ -22,12 +22,14 @@ use windows_sys::Win32::Foundation::{
     HANDLE, 
     MAX_PATH, 
     NTSTATUS, 
-    UNICODE_STRING
+    UNICODE_STRING,
+    HMODULE
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FindClose, FindFileHandle, FindFirstFileExW, FindFirstFileW, FindNextFileW, GetFileAttributesExW, GetFileAttributesW, NtCreateFile, FILE_ATTRIBUTE_DIRECTORY, FILE_CREATION_DISPOSITION, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE, FINDEX_INFO_LEVELS, FINDEX_SEARCH_OPS, FIND_FIRST_EX_FLAGS, GET_FILEEX_INFO_LEVELS, NT_CREATE_FILE_DISPOSITION, WIN32_FIND_DATAW
 };
+use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
 use windows_sys::Win32::System::WindowsProgramming::{
     IO_STATUS_BLOCK,
     IO_STATUS_BLOCK_0,
@@ -88,6 +90,8 @@ static_detour! {
     ) -> BOOL;
 
     pub static FindClose_Detour: unsafe extern "system" fn(HANDLE) -> BOOL;
+
+    pub static LoadLibraryW_Detour: unsafe extern "system" fn(PCWSTR) -> HMODULE;
 }
 
 pub unsafe fn enable_hooks() -> Result<(), Box<dyn Error>> {
@@ -134,6 +138,11 @@ pub unsafe fn enable_hooks() -> Result<(), Box<dyn Error>> {
     FindFirstFileExW_Detour.initialize(FindFirstFileExW, |a, b, c, d, e, f| unsafe {
         findfirstfileexw_detour(a, b, c, d, e, f)
     })?.enable()?;
+
+    LoadLibraryW_Detour.initialize(LoadLibraryW, |lpfilename| unsafe {
+        loadlibraryw_detour(lpfilename)
+    })?.enable()?;
+    
 
     Ok(())
 }
@@ -215,7 +224,7 @@ pub unsafe extern "system" fn ntcreatefile_detour(
     let original_path = PathBuf::from(original_path_str.to_string().unwrap());
     let new_path = NormalizedPath::new(&original_path);
     let new_path = utils::reroot_path(&new_path).unwrap_or(new_path.0);
-
+    
     debug!("[ntcreatefile_detour] {:?} to {:?}", original_path, new_path);
 
     // Update the Length property in the UNICODE_STRING struct with the new length of the path.
@@ -363,4 +372,17 @@ unsafe extern "system" fn findfirstfileexw_detour(
         search_filter,
         additional_flags
     )
+}
+
+
+unsafe extern "system" fn loadlibraryw_detour(lpfilename: PCWSTR) -> HMODULE {
+    let path = utils::pcwstr_to_path(lpfilename);
+    let new_path = utils::reroot_path(&path).unwrap_or(path.0.clone());
+    debug!("[loadlibraryw_detour] {:?} to {:?}", path, new_path);
+
+    let wide_path = utils::path_to_widestring(&new_path);
+
+    let raw_path = wide_path.as_ptr();
+
+    LoadLibraryW_Detour.call(raw_path)
 }
