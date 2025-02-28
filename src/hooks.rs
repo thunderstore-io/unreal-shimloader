@@ -29,13 +29,14 @@ use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FindClose, FindFileHandle, FindFirstFileExW, FindFirstFileW, FindNextFileW, GetFileAttributesExW, GetFileAttributesW, NtCreateFile, FILE_ATTRIBUTE_DIRECTORY, FILE_CREATION_DISPOSITION, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE, FINDEX_INFO_LEVELS, FINDEX_SEARCH_OPS, FIND_FIRST_EX_FLAGS, GET_FILEEX_INFO_LEVELS, NT_CREATE_FILE_DISPOSITION, WIN32_FIND_DATAW
 };
-use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
+use windows_sys::Win32::System::LibraryLoader::{LoadLibraryW, AddDllDirectory};
 use windows_sys::Win32::System::WindowsProgramming::{
     IO_STATUS_BLOCK,
     IO_STATUS_BLOCK_0,
     OBJECT_ATTRIBUTES
 };
 use crate::utils::{self, NormalizedPath};
+
 
 static_detour! {
     pub static CreateFileW_Detour: unsafe extern "system" fn(
@@ -92,7 +93,10 @@ static_detour! {
     pub static FindClose_Detour: unsafe extern "system" fn(HANDLE) -> BOOL;
 
     pub static LoadLibraryW_Detour: unsafe extern "system" fn(PCWSTR) -> HMODULE;
+
+    pub static AddDllDirectory_Detour: unsafe extern "system" fn(PCWSTR) -> *mut c_void;
 }
+
 
 pub unsafe fn enable_hooks() -> Result<(), Box<dyn Error>> {
     CreateFileW_Detour.initialize(CreateFileW, |a, b, c, d, e, f, g| unsafe {
@@ -141,6 +145,10 @@ pub unsafe fn enable_hooks() -> Result<(), Box<dyn Error>> {
 
     LoadLibraryW_Detour.initialize(LoadLibraryW, |lpfilename| unsafe {
         loadlibraryw_detour(lpfilename)
+    })?.enable()?;
+
+    AddDllDirectory_Detour.initialize(AddDllDirectory, |lppathnamestr| unsafe {
+        adddlldirectory_detour(lppathnamestr) 
     })?.enable()?;
     
 
@@ -385,4 +393,16 @@ unsafe extern "system" fn loadlibraryw_detour(lpfilename: PCWSTR) -> HMODULE {
     let raw_path = wide_path.as_ptr();
 
     LoadLibraryW_Detour.call(raw_path)
+}
+
+unsafe extern "system" fn adddlldirectory_detour(lppathnamestr: PCWSTR) -> *mut c_void {
+    let path = utils::pcwstr_to_path(lppathnamestr);
+    let new_path = utils::reroot_path(&path).unwrap_or(path.0.clone());
+    
+    debug!("[adddlldirectory_detour] {:?} to {:?}", path, new_path);
+
+    let wide_path = utils::path_to_widestring(&new_path);
+    let raw_path = wide_path.as_ptr();
+
+    AddDllDirectory_Detour.call(raw_path)
 }
