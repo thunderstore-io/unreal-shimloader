@@ -205,13 +205,41 @@ pub unsafe extern "system" fn ntcreatefile_detour(
     let og_prefix = slice::from_raw_parts(unicode_path.Buffer, 4);
     let offset_path = unicode_path.Buffer.add(4);
 
-    let original_path_str = U16CStr::from_ptr(offset_path, path_len - 4)
-        .expect("Failed to create U16CStr from raw unicode buffer.");
-
+    // Create a raw slice and handle potential nulls safely
+    let slice = slice::from_raw_parts(offset_path, path_len - 4);
+    
+    // Find the first null terminator, if any
+    let null_pos = slice.iter().position(|&c| c == 0);
+    
+    let effective_len = null_pos.unwrap_or(path_len - 4);
+    let effective_slice = &slice[..effective_len];
+    
+    // Use from_vec instead of from_slice
+    let wide_string = WideString::from_vec(effective_slice.to_vec());
+    let original_path_result = wide_string.to_string();
+    
+    // Early return if we can't process the path
+    if original_path_result.is_err() {
+        return NtCreateFile_Detour.call(
+            file_handle,
+            desired_access,
+            object_attrs,
+            io_status_block,
+            allocation_size,
+            file_attrs,
+            share_access,
+            creation_disposition,
+            create_options,
+            ea_buffer,
+            ea_length
+        );
+    }
+    
+    let original_path_str = original_path_result.unwrap();
+    
     let bad_path_prefixes = ["\\\\device", "c:\\windows"];
     if bad_path_prefixes.iter().any(|x| {
-        let lowercase = original_path_str.to_string().unwrap().to_lowercase();
-
+        let lowercase = original_path_str.to_lowercase();
         lowercase.starts_with(&x.to_lowercase())
     }) {
         return NtCreateFile_Detour.call(
@@ -229,7 +257,7 @@ pub unsafe extern "system" fn ntcreatefile_detour(
         );
     };
 
-    let original_path = PathBuf::from(original_path_str.to_string().unwrap());
+    let original_path = PathBuf::from(original_path_str);
     let new_path = NormalizedPath::new(&original_path);
     let new_path = utils::reroot_path(&new_path).unwrap_or(new_path.0);
     
