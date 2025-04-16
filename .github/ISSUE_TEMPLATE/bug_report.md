@@ -6,6 +6,7 @@ labels: ''
 assignees: ''
 
 ---
+**DO NOT SUBMIT A REPORT THAT IS NOT A BUG (ie. antivirus flagging)**
 
 **Describe the bug**
 A clear and concise description of what the bug is.
