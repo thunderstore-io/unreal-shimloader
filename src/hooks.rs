@@ -328,36 +328,28 @@ unsafe extern "system" fn getfileattributesexw_detour(
     info_level_id: GET_FILEEX_INFO_LEVELS,
     file_information: *mut c_void,
 ) -> BOOL {
-    let before = U16CStr::from_ptr_str(raw_file_name);
     let path = utils::pcwstr_to_path(raw_file_name);
     let new_path = utils::reroot_path(&path).unwrap_or(path.0.clone());
 
     debug!("[getfileattributesexw_detour] {:?} to {:?}", path, new_path);
-
+    
     let wide_path = utils::path_to_widestring(&new_path);
-
-    let raw_path = if path.0 == new_path {
-        raw_file_name
-    } else {
-        wide_path.as_ptr()
-    };
-
-    let result = GetFileAttributesExW_Detour.call(
-        raw_path,
+    
+    // Use the original Windows API to get attributes
+    let attrs = GetFileAttributesW(wide_path.as_ptr());
+    
+    // If the path doesn't exist, handle it properly
+    if attrs == 0xFFFFFFFF {
+        // The error is already set by GetFileAttributesW
+        return 0;
+    }
+    
+    // Call the original function with our path
+    GetFileAttributesExW_Detour.call(
+        wide_path.as_ptr(),
         info_level_id,
         file_information
-    );
-
-    let test = *file_information.cast::<usize>().cast::<WIN32_FIND_DATAW>();
-    debug!("{:?}", U16CStr::from_ptr_str(test.cFileName.as_ptr()));
-    debug!("-> {}", result);
-
-    if result == 0 {
-        let error = GetLastError();
-        debug!("ERROR: {:#?}", error);
-    }
-
-    result
+    )
 }
 
 unsafe extern "system" fn findfirstfilew_detour(
