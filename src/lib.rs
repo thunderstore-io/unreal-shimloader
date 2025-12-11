@@ -17,7 +17,7 @@ use chrono::Local;
 use log::{debug, error, LevelFilter};
 use getargs::{Arg, Opt, Options};
 use once_cell::sync::{Lazy, OnceCell};
-use utils::NormalizedPath;
+use paths::{NormalizedPath, PathRegistry, PATH_REGISTRY};
 use widestring::U16CString;
 use windows_sys::w;
 use windows_sys::Win32::Foundation::{BOOL, HWND, TRUE};
@@ -29,11 +29,8 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessId};
 use windows_sys::Win32::UI::WindowsAndMessaging::{MESSAGEBOX_STYLE, MessageBoxW};
 
 mod hooks;
+mod paths;
 mod utils;
-
-static BP_MODS: OnceCell<PathBuf> = OnceCell::new();
-static UE4SS_MODS: OnceCell<PathBuf> = OnceCell::new();
-static CONFIG_DIR: OnceCell<PathBuf> = OnceCell::new();
 
 static GAME_ROOT: Lazy<PathBuf> = Lazy::new(|| {
     let current_exe = env::current_exe().unwrap();
@@ -60,8 +57,8 @@ pub unsafe extern "system" fn DllMain(
     call_reason: u32,
     reserved: *const c_void
 ) -> BOOL {
-    if call_reason == DLL_PROCESS_ATTACH && UE4SS_MODS.get().is_none() {
-        // Initialize the shim if we haven't yet set the TARGET_DIR static.
+    if call_reason == DLL_PROCESS_ATTACH && PATH_REGISTRY.get().is_none() {
+        // Initialize the shim if we haven't yet set the PATH_REGISTRY static.
         // This ensures that DllMain is not called multiple times with DLL_PROCESS_ATTACH.
         shim_init();
     }
@@ -169,17 +166,38 @@ unsafe fn shim_init() {
     }
 
     // Create the ue4ss_mods and bp_mods directories if they don't already exist.
-    let ue4ss_mods = utils::normalize_path(&lua_dir.unwrap());
-    let bp_mods = utils::normalize_path(&pak_dir.unwrap());
-    let config_dir = utils::normalize_path(&cfg_dir.unwrap());
+    let ue4ss_mods = paths::NormalizedPath::new(&lua_dir.unwrap());
+    let bp_mods = paths::NormalizedPath::new(&pak_dir.unwrap());
+    let config_dir = paths::NormalizedPath::new(&cfg_dir.unwrap());
 
-    for dir in [&ue4ss_mods, &bp_mods, &config_dir] {
-        fs::create_dir_all(dir);
+    for dir in [ue4ss_mods.as_ref(), bp_mods.as_ref(), config_dir.as_ref()] {
+        let _ = fs::create_dir_all(dir);
     }
     
-    BP_MODS.set(bp_mods);
-    UE4SS_MODS.set(ue4ss_mods);
-    CONFIG_DIR.set(config_dir);
+    // Build the path registry with all virtual directory mappings.
+    let mut registry = PathRegistry::new();
+
+    // Lua mods: GAME/Binaries/Win64/Mods/ -> user's mod directory
+    registry.register(EXE_DIR.join("Mods"), ue4ss_mods.to_path_buf());
+    
+    // Blueprint mods: GAME/Content/Paks/LogicMods/ -> user's pak directory
+    // NormalizedPath automatically cleans .. components
+    let bp_source = EXE_DIR
+        .join("..")
+        .join("..")
+        .join("Content")
+        .join("Paks")
+        .join("LogicMods");
+    registry.register(bp_source, bp_mods.to_path_buf());
+    
+    // Config: GAME/Config/ -> user's config directory
+    let config_source = EXE_DIR
+        .join("..")
+        .join("..")
+        .join("Config");
+    registry.register(config_source, config_dir.to_path_buf());
+
+    let _ = PATH_REGISTRY.set(registry);
 
     if let Err(e) = hooks::enable_hooks() {
         panic!("Failed to enable one or more hooks. {e}")

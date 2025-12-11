@@ -35,7 +35,7 @@ use windows_sys::Win32::System::WindowsProgramming::{
     IO_STATUS_BLOCK_0,
     OBJECT_ATTRIBUTES
 };
-use crate::utils::{self, NormalizedPath};
+use crate::paths::{self, NormalizedPath, remap_path};
 
 
 static_detour! {
@@ -164,12 +164,12 @@ pub unsafe extern "system" fn createfilew_detour(
     flags_attributes: FILE_FLAGS_AND_ATTRIBUTES,
     template_file: HANDLE,
 ) -> HANDLE {
-    let path = utils::pcwstr_to_path(raw_file_name);
-    let new_path = utils::reroot_path(&path).unwrap_or(path.0.clone());
+    let path = paths::pcwstr_to_path(raw_file_name);
+    let new_path = remap_path(&path).unwrap_or_else(|| path.to_path_buf());
 
     debug!("[createfilew_detour] {:?} to {:?}", path, new_path);
 
-    let wide_path = utils::path_to_widestring(&new_path);
+    let wide_path = paths::path_to_widestring(&new_path);
 
     let raw_path = wide_path.as_ptr();
 
@@ -259,13 +259,13 @@ pub unsafe extern "system" fn ntcreatefile_detour(
 
     let original_path = PathBuf::from(original_path_str);
     let new_path = NormalizedPath::new(&original_path);
-    let new_path = utils::reroot_path(&new_path).unwrap_or(new_path.0);
+    let new_path = remap_path(&new_path).unwrap_or_else(|| new_path.to_path_buf());
     
     debug!("[ntcreatefile_detour] {:?} to {:?}", original_path, new_path);
 
     // Update the Length property in the UNICODE_STRING struct with the new length of the path.
     // (+ convert the new path back into a raw widestring and copy it into the buffer.)
-    let wide_new_path = utils::path_to_widestring(&new_path);
+    let wide_new_path = paths::path_to_widestring(&new_path);
     let new_path_size = (wide_new_path.len() * 2) + 8;
 
     let buffer_layout = Layout::array::<u16>(og_prefix.len() + wide_new_path.len() + 1).unwrap();
@@ -305,14 +305,14 @@ pub unsafe extern "system" fn ntcreatefile_detour(
 unsafe extern "system" fn getfileattributesw_detour(
     raw_file_name: PCWSTR,
 ) -> u32 {
-    let path = utils::pcwstr_to_path(raw_file_name);
-    let new_path = utils::reroot_path(&path).unwrap_or(path.0.clone());
+    let path = paths::pcwstr_to_path(raw_file_name);
+    let new_path = remap_path(&path).unwrap_or_else(|| path.to_path_buf());
 
     debug!("[getfileattributesw_detour] {:?} to {:?}", path, new_path);
 
-    let wide_path = utils::path_to_widestring(&new_path);
+    let wide_path = paths::path_to_widestring(&new_path);
 
-    let raw_path = if path.0 == new_path {
+    let raw_path = if path.to_path_buf() == new_path {
         raw_file_name
     } else {
         wide_path.as_ptr()
@@ -328,12 +328,12 @@ unsafe extern "system" fn getfileattributesexw_detour(
     info_level_id: GET_FILEEX_INFO_LEVELS,
     file_information: *mut c_void,
 ) -> BOOL {
-    let path = utils::pcwstr_to_path(raw_file_name);
-    let new_path = utils::reroot_path(&path).unwrap_or(path.0.clone());
+    let path = paths::pcwstr_to_path(raw_file_name);
+    let new_path = remap_path(&path).unwrap_or_else(|| path.to_path_buf());
 
     debug!("[getfileattributesexw_detour] {:?} to {:?}", path, new_path);
     
-    let wide_path = utils::path_to_widestring(&new_path);
+    let wide_path = paths::path_to_widestring(&new_path);
     
     // Use the original Windows API to get attributes
     let attrs = GetFileAttributesW(wide_path.as_ptr());
@@ -356,14 +356,14 @@ unsafe extern "system" fn findfirstfilew_detour(
     raw_file_name: PCWSTR,
     find_file_data: *mut WIN32_FIND_DATAW,
 ) -> FindFileHandle {
-    let path = utils::pcwstr_to_path(raw_file_name);
-    let new_path = utils::reroot_path(&path).unwrap_or(path.0.clone());
+    let path = paths::pcwstr_to_path(raw_file_name);
+    let new_path = remap_path(&path).unwrap_or_else(|| path.to_path_buf());
 
     debug!("[findfirstfilew_detour] {:?} to {:?}", path, new_path);
 
-    let wide_path = utils::path_to_widestring(&new_path);
+    let wide_path = paths::path_to_widestring(&new_path);
 
-    let raw_path = if path.0 == new_path {
+    let raw_path = if path.to_path_buf() == new_path {
         raw_file_name
     } else {
         wide_path.as_ptr()
@@ -383,12 +383,12 @@ unsafe extern "system" fn findfirstfileexw_detour(
     search_filter: *const c_void,
     additional_flags: FIND_FIRST_EX_FLAGS
 ) -> FindFileHandle {
-    let path = utils::pcwstr_to_path(raw_file_name);
-    let new_path = utils::reroot_path(&path).unwrap_or(path.0.clone());
+    let path = paths::pcwstr_to_path(raw_file_name);
+    let new_path = remap_path(&path).unwrap_or_else(|| path.to_path_buf());
 
     debug!("[findfirstfileexw_detour] {:?} to {:?}", path, new_path);
 
-    let wide_path = utils::path_to_widestring(&new_path);
+    let wide_path = paths::path_to_widestring(&new_path);
 
     let raw_path = wide_path.as_ptr();
 
@@ -404,11 +404,11 @@ unsafe extern "system" fn findfirstfileexw_detour(
 
 
 unsafe extern "system" fn loadlibraryw_detour(lpfilename: PCWSTR) -> HMODULE {
-    let path = utils::pcwstr_to_path(lpfilename);
-    let new_path = utils::reroot_path(&path).unwrap_or(path.0.clone());
+    let path = paths::pcwstr_to_path(lpfilename);
+    let new_path = remap_path(&path).unwrap_or_else(|| path.to_path_buf());
     debug!("[loadlibraryw_detour] {:?} to {:?}", path, new_path);
 
-    let wide_path = utils::path_to_widestring(&new_path);
+    let wide_path = paths::path_to_widestring(&new_path);
 
     let raw_path = wide_path.as_ptr();
 
@@ -416,12 +416,12 @@ unsafe extern "system" fn loadlibraryw_detour(lpfilename: PCWSTR) -> HMODULE {
 }
 
 unsafe extern "system" fn adddlldirectory_detour(lppathnamestr: PCWSTR) -> *mut c_void {
-    let path = utils::pcwstr_to_path(lppathnamestr);
-    let new_path = utils::reroot_path(&path).unwrap_or(path.0.clone());
+    let path = paths::pcwstr_to_path(lppathnamestr);
+    let new_path = remap_path(&path).unwrap_or_else(|| path.to_path_buf());
     
     debug!("[adddlldirectory_detour] {:?} to {:?}", path, new_path);
 
-    let wide_path = utils::path_to_widestring(&new_path);
+    let wide_path = paths::path_to_widestring(&new_path);
     let raw_path = wide_path.as_ptr();
 
     AddDllDirectory_Detour.call(raw_path)
