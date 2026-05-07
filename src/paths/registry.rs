@@ -237,6 +237,75 @@ mod tests {
     }
 
     #[test]
+    fn test_overlay_scan_routes_wrapper_files_through_exe_dir() {
+        // r2modman installs wrapper packages as <overlay>/<package>/<files>.
+        // Validate that shimloader walks the package subdirectory layer
+        // correctly: each file under `<package>/<rel>` should remap to
+        // `exe_dir/<rel>`, regardless of nesting depth.
+        let tmp = tempfile::tempdir().unwrap();
+        let overlay_root = tmp.path();
+
+        let wrapper = overlay_root.join("Author-Wrap");
+        fs::create_dir_all(wrapper.join("sub")).unwrap();
+        fs::write(wrapper.join("foo.txt"), "").unwrap();
+        fs::write(wrapper.join("sub").join("bar.txt"), "").unwrap();
+
+        let exe_dir = Path::new("C:\\Game\\Win64");
+        let mut registry = PathRegistry::new();
+        registry.register_overlay_dir(overlay_root, exe_dir);
+
+        let foo = NormalizedPath::new("C:\\Game\\Win64\\foo.txt");
+        assert_eq!(registry.try_remap(&foo), Some(wrapper.join("foo.txt")));
+
+        let bar = NormalizedPath::new("C:\\Game\\Win64\\sub\\bar.txt");
+        assert_eq!(registry.try_remap(&bar), Some(wrapper.join("sub").join("bar.txt")));
+    }
+
+    #[test]
+    fn test_overlay_scan_first_wrapper_wins_on_collision() {
+        // Two wrappers with the same logical path: alphabetically-first wins,
+        // second is logged and skipped. Sort is on PathBuf, so "Author-A"
+        // sorts before "Author-B".
+        let tmp = tempfile::tempdir().unwrap();
+        let overlay_root = tmp.path();
+
+        let first = overlay_root.join("Author-A");
+        let second = overlay_root.join("Author-B");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(first.join("shared.txt"), "").unwrap();
+        fs::write(second.join("shared.txt"), "").unwrap();
+
+        let exe_dir = Path::new("C:\\Game\\Win64");
+        let mut registry = PathRegistry::new();
+        registry.register_overlay_dir(overlay_root, exe_dir);
+
+        let shared = NormalizedPath::new("C:\\Game\\Win64\\shared.txt");
+        assert_eq!(registry.try_remap(&shared), Some(first.join("shared.txt")));
+    }
+
+    #[test]
+    fn test_overlay_scan_tombstone_masks_subtree() {
+        // A tombstone inside a wrapper subdirectory masks the corresponding
+        // exe_dir subdirectory and skips registering anything under it.
+        let tmp = tempfile::tempdir().unwrap();
+        let overlay_root = tmp.path();
+
+        let cheat = overlay_root.join("Author-Wrap").join("Mods").join("CheatMod");
+        fs::create_dir_all(&cheat).unwrap();
+        fs::write(cheat.join(".shim-removed"), "").unwrap();
+        fs::write(cheat.join("inside.txt"), "").unwrap();
+
+        let exe_dir = Path::new("C:\\Game\\Win64");
+        let mut registry = PathRegistry::new();
+        registry.register_overlay_dir(overlay_root, exe_dir);
+
+        let inside = NormalizedPath::new("C:\\Game\\Win64\\Mods\\CheatMod\\inside.txt");
+        assert!(registry.is_masked(&inside));
+        assert!(registry.try_remap(&inside).is_none());
+    }
+
+    #[test]
     fn test_mask_shadows_overlapping_remap_source() {
         // If a wrapper ships `.shim-removed` inside e.g. `Mods/`, the overlay
         // scan registers a mask at `exe_dir/Mods`, which is also the source
