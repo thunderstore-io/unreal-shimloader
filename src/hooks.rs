@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::{alloc, mem, ptr, slice};
-use std::alloc::Layout;
+use std::{mem, ptr, slice};
 use std::error::Error;
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
@@ -9,8 +8,8 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use log::{debug, error};
-use once_cell::sync::Lazy;
-use retour::static_detour;
+use once_cell::sync::{Lazy, OnceCell};
+use retour::{static_detour, GenericDetour};
 use widestring::{U16CStr, U16CString, WideString};
 use windows_sys::core::{PCWSTR, PWSTR};
 use windows_sys::w;
@@ -34,7 +33,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FindClose, FindFileHandle, FindFirstFileExW, FindFirstFileW, FindNextFileW, GetFileAttributesExW, GetFileAttributesW, NtCreateFile, FILE_ATTRIBUTE_DIRECTORY, FILE_CREATION_DISPOSITION, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE, FINDEX_INFO_LEVELS, FINDEX_SEARCH_OPS, FIND_FIRST_EX_FLAGS, GET_FILEEX_INFO_LEVELS, NT_CREATE_FILE_DISPOSITION, WIN32_FIND_DATAW
 };
 use windows_sys::Win32::System::Environment::GetCommandLineW;
-use windows_sys::Win32::System::LibraryLoader::{LoadLibraryW, LoadLibraryExW, AddDllDirectory, GetModuleFileNameW, LOAD_LIBRARY_FLAGS};
+use windows_sys::Win32::System::LibraryLoader::{LoadLibraryW, LoadLibraryExW, AddDllDirectory, GetModuleFileNameW, GetModuleHandleW, GetProcAddress, LOAD_LIBRARY_FLAGS};
 use windows_sys::Win32::System::WindowsProgramming::{
     IO_STATUS_BLOCK,
     IO_STATUS_BLOCK_0,
@@ -43,6 +42,30 @@ use windows_sys::Win32::System::WindowsProgramming::{
 use crate::paths::{self, NormalizedPath, is_masked, remap_path, reverse_remap};
 
 const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFF_FFFF;
+
+// Not in windows-sys 0.48. Static link is safe; both are NT4+.
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtQueryAttributesFile(
+        ObjectAttributes: *mut OBJECT_ATTRIBUTES,
+        FileInformation: *mut c_void,
+    ) -> NTSTATUS;
+
+    fn NtQueryFullAttributesFile(
+        ObjectAttributes: *mut OBJECT_ATTRIBUTES,
+        FileInformation: *mut c_void,
+    ) -> NTSTATUS;
+}
+
+/// Win10 1809+, resolved dynamically. MSVC 17.x routes
+/// `std::filesystem::status` / `exists` through this.
+type NtQueryInformationByNameFn = unsafe extern "system" fn(
+    *mut OBJECT_ATTRIBUTES,
+    *mut IO_STATUS_BLOCK,
+    *mut c_void,
+    u32,
+    u32,
+) -> NTSTATUS;
 
 
 static_detour! {
@@ -68,6 +91,16 @@ static_detour! {
         u32,
         *mut c_void,
         u32
+    ) -> NTSTATUS;
+
+    pub static NtQueryAttributesFile_Detour: unsafe extern "system" fn(
+        *mut OBJECT_ATTRIBUTES,
+        *mut c_void
+    ) -> NTSTATUS;
+
+    pub static NtQueryFullAttributesFile_Detour: unsafe extern "system" fn(
+        *mut OBJECT_ATTRIBUTES,
+        *mut c_void
     ) -> NTSTATUS;
 
     pub static GetFileAttributesW_Detour: unsafe extern "system" fn(PCWSTR) -> u32;
@@ -126,6 +159,10 @@ static SANITIZED_COMMAND_LINE: Lazy<U16CString> = Lazy::new(|| unsafe {
     U16CString::from_vec_truncate(cleaned)
 });
 
+/// Populated only on Win10 1809+, where `GetProcAddress` finds the export.
+static NT_QUERY_INFORMATION_BY_NAME_DETOUR: OnceCell<GenericDetour<NtQueryInformationByNameFn>> =
+    OnceCell::new();
+
 
 pub unsafe fn enable_hooks() -> Result<(), Box<dyn Error>> {
     CreateFileW_Detour.initialize(CreateFileW, |a, b, c, d, e, f, g| unsafe {
@@ -155,6 +192,29 @@ pub unsafe fn enable_hooks() -> Result<(), Box<dyn Error>> {
             k,
         )
     })?.enable()?;
+
+    NtQueryAttributesFile_Detour.initialize(NtQueryAttributesFile, |a, b| {
+        ntqueryattributesfile_detour(a, b)
+    })?.enable()?;
+
+    NtQueryFullAttributesFile_Detour.initialize(NtQueryFullAttributesFile, |a, b| {
+        ntqueryfullattributesfile_detour(a, b)
+    })?.enable()?;
+
+    // Win10 1809+. Populate the OnceCell before enable() so a racing caller
+    // can't observe an empty cell from inside the detour body.
+    if let Some(target) =
+        resolve_ntdll_export::<NtQueryInformationByNameFn>(b"NtQueryInformationByName\0")
+    {
+        let detour = GenericDetour::new(target, ntqueryinformationbyname_detour)?;
+        if NT_QUERY_INFORMATION_BY_NAME_DETOUR.set(detour).is_err() {
+            error!("NtQueryInformationByName detour already initialized");
+        } else if let Some(stored) = NT_QUERY_INFORMATION_BY_NAME_DETOUR.get() {
+            stored.enable()?;
+        }
+    } else {
+        debug!("NtQueryInformationByName not exported by ntdll; hook skipped");
+    }
 
     GetFileAttributesW_Detour.initialize(GetFileAttributesW, |a| unsafe {
         getfileattributesw_detour(a)
@@ -219,9 +279,13 @@ pub unsafe extern "system" fn createfilew_detour(
         SetLastError(ERROR_FILE_NOT_FOUND);
         return INVALID_HANDLE_VALUE;
     }
-    let new_path = remap_path(&path).unwrap_or_else(|| path.to_path_buf());
-
-    debug!("[createfilew_detour] {:?} to {:?}", path, new_path);
+    let new_path = match remap_path(&path) {
+        Some(remapped) => {
+            debug!("[createfilew_detour] {:?} to {:?}", path, remapped);
+            remapped
+        }
+        None => path.to_path_buf(),
+    };
 
     let wide_path = paths::path_to_widestring(&new_path);
 
@@ -238,6 +302,120 @@ pub unsafe extern "system" fn createfilew_detour(
     )
 }
 
+/// Outcome of splicing a remapped path into an `OBJECT_ATTRIBUTES`.
+enum SpliceOutcome {
+    /// Path is masked; caller returns "not found" without forwarding.
+    Masked,
+    /// Forward the call unmodified.
+    Bypass,
+    /// Forward the call; dropping the guard restores `ObjectName` and frees
+    /// the spliced allocation.
+    Forwarded(ObjectAttributesGuard),
+}
+
+/// Restores `ObjectName` and frees the spliced buffer + `UNICODE_STRING` on drop.
+struct ObjectAttributesGuard {
+    object_attrs: *mut OBJECT_ATTRIBUTES,
+    original_name: *mut UNICODE_STRING,
+    _buffer: Vec<u16>,
+    spliced_unicode: *mut UNICODE_STRING,
+}
+
+impl Drop for ObjectAttributesGuard {
+    fn drop(&mut self) {
+        unsafe {
+            (*self.object_attrs).ObjectName = self.original_name;
+            drop(Box::from_raw(self.spliced_unicode));
+        }
+    }
+}
+
+/// Decode the path from `OBJECT_ATTRIBUTES.ObjectName`, run it through the
+/// remap registry, and install a heap-backed spliced `UNICODE_STRING` if a
+/// remap fires. Shared by all NT-layer detours that take an `OBJECT_ATTRIBUTES`.
+unsafe fn splice_object_attributes_path(
+    object_attrs: *mut OBJECT_ATTRIBUTES,
+    log_tag: &str,
+) -> SpliceOutcome {
+    if object_attrs.is_null() {
+        return SpliceOutcome::Bypass;
+    }
+    let original_name = (*object_attrs).ObjectName;
+    if original_name.is_null() {
+        return SpliceOutcome::Bypass;
+    }
+    let unicode_path = *original_name;
+    let path_len = (unicode_path.Length / 2) as usize;
+
+    // Need 4 wchars for the `\??\` prefix; below that `path_len - 4` underflows.
+    if path_len < 4 || unicode_path.Buffer.is_null() {
+        return SpliceOutcome::Bypass;
+    }
+
+    let prefix_slice = slice::from_raw_parts(unicode_path.Buffer, 4);
+    let body_slice = slice::from_raw_parts(unicode_path.Buffer.add(4), path_len - 4);
+
+    let effective_len = body_slice
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(body_slice.len());
+    let body = &body_slice[..effective_len];
+
+    let Ok(path_str) = WideString::from_vec(body.to_vec()).to_string() else {
+        return SpliceOutcome::Bypass;
+    };
+
+    let bad_prefixes = ["\\\\device", "c:\\windows"];
+    let lower = path_str.to_lowercase();
+    if bad_prefixes.iter().any(|p| lower.starts_with(p)) {
+        return SpliceOutcome::Bypass;
+    }
+
+    let original_path = PathBuf::from(&path_str);
+    let normalized = NormalizedPath::new(&original_path);
+
+    if is_masked(&normalized) {
+        debug!("[{}] masked: {:?}", log_tag, original_path);
+        return SpliceOutcome::Masked;
+    }
+
+    let new_path = match remap_path(&normalized) {
+        Some(remapped) => {
+            debug!("[{}] {:?} to {:?}", log_tag, original_path, remapped);
+            remapped
+        }
+        None => normalized.to_path_buf(),
+    };
+
+    let wide_new_path = paths::path_to_widestring(&new_path);
+
+    // Buffer layout: original prefix + remapped path + null terminator.
+    let mut buffer: Vec<u16> = Vec::with_capacity(prefix_slice.len() + wide_new_path.len() + 1);
+    buffer.extend_from_slice(prefix_slice);
+    buffer.extend_from_slice(wide_new_path.as_slice());
+    buffer.push(0);
+
+    // Length excludes the null terminator; MaximumLength includes it.
+    let used_bytes = ((buffer.len() - 1) * 2) as u16;
+    let max_bytes = (buffer.len() * 2) as u16;
+    let buffer_ptr = buffer.as_mut_ptr();
+
+    let spliced_unicode = Box::into_raw(Box::new(UNICODE_STRING {
+        Length: used_bytes,
+        MaximumLength: max_bytes,
+        Buffer: buffer_ptr,
+    }));
+
+    (*object_attrs).ObjectName = spliced_unicode;
+
+    SpliceOutcome::Forwarded(ObjectAttributesGuard {
+        object_attrs,
+        original_name,
+        _buffer: buffer,
+        spliced_unicode,
+    })
+}
+
 pub unsafe extern "system" fn ntcreatefile_detour(
     file_handle: *mut HANDLE,
     desired_access: u32,
@@ -251,100 +429,12 @@ pub unsafe extern "system" fn ntcreatefile_detour(
     ea_buffer: *mut c_void,
     ea_length: u32,
 ) -> NTSTATUS {
-    // The path is stored a couple layers deep in a UNICODE_STRING struct. Lets grab it.
-    let unicode_path = *(*object_attrs).ObjectName;
-    let path_len = (unicode_path.Length / 2) as usize;
-
-    // Strip the Rtl prefix from the given string. We need to reintroduce this later.
-    let og_prefix = slice::from_raw_parts(unicode_path.Buffer, 4);
-    let offset_path = unicode_path.Buffer.add(4);
-
-    // Create a raw slice and handle potential nulls safely
-    let slice = slice::from_raw_parts(offset_path, path_len - 4);
-
-    // Find the first null terminator, if any
-    let null_pos = slice.iter().position(|&c| c == 0);
-
-    let effective_len = null_pos.unwrap_or(path_len - 4);
-    let effective_slice = &slice[..effective_len];
-
-    // Use from_vec instead of from_slice
-    let wide_string = WideString::from_vec(effective_slice.to_vec());
-    let original_path_result = wide_string.to_string();
-
-    // Early return if we can't process the path
-    if original_path_result.is_err() {
-        return NtCreateFile_Detour.call(
-            file_handle,
-            desired_access,
-            object_attrs,
-            io_status_block,
-            allocation_size,
-            file_attrs,
-            share_access,
-            creation_disposition,
-            create_options,
-            ea_buffer,
-            ea_length
-        );
-    }
-
-    let original_path_str = original_path_result.unwrap();
-
-    let bad_path_prefixes = ["\\\\device", "c:\\windows"];
-    if bad_path_prefixes.iter().any(|x| {
-        let lowercase = original_path_str.to_lowercase();
-        lowercase.starts_with(&x.to_lowercase())
-    }) {
-        return NtCreateFile_Detour.call(
-            file_handle,
-            desired_access,
-            object_attrs,
-            io_status_block,
-            allocation_size,
-            file_attrs,
-            share_access,
-            creation_disposition,
-            create_options,
-            ea_buffer,
-            ea_length
-        );
+    let _guard = match splice_object_attributes_path(object_attrs, "ntcreatefile_detour") {
+        SpliceOutcome::Masked => return STATUS_OBJECT_NAME_NOT_FOUND,
+        SpliceOutcome::Bypass => None,
+        SpliceOutcome::Forwarded(g) => Some(g),
     };
 
-    let original_path = PathBuf::from(original_path_str);
-    let new_path = NormalizedPath::new(&original_path);
-    if is_masked(&new_path) {
-        debug!("[ntcreatefile_detour] masked: {:?}", original_path);
-        return STATUS_OBJECT_NAME_NOT_FOUND;
-    }
-    let new_path = remap_path(&new_path).unwrap_or_else(|| new_path.to_path_buf());
-
-    debug!("[ntcreatefile_detour] {:?} to {:?}", original_path, new_path);
-
-    // Update the Length property in the UNICODE_STRING struct with the new length of the path.
-    // (+ convert the new path back into a raw widestring and copy it into the buffer.)
-    let wide_new_path = paths::path_to_widestring(&new_path);
-    let new_path_size = (wide_new_path.len() * 2) + 8;
-
-    let buffer_layout = Layout::array::<u16>(og_prefix.len() + wide_new_path.len() + 1).unwrap();
-    let buffer = alloc::alloc_zeroed(buffer_layout).cast::<u16>();
-
-    // The length of the buffer in bytes.
-    let used_size = (og_prefix.len() + wide_new_path.len()) * 2;
-    let buffer_size = used_size + 2;
-
-    ptr::copy_nonoverlapping(og_prefix.as_ptr(), buffer, og_prefix.len());
-    ptr::copy_nonoverlapping(wide_new_path.as_ptr(), buffer.add(og_prefix.len()), wide_new_path.len());
-
-    let mut new_unicode = UNICODE_STRING {
-        Length: used_size as _,
-        MaximumLength: buffer_size as _,
-        Buffer: buffer,
-    };
-
-    (*object_attrs).ObjectName = ptr::addr_of_mut!(new_unicode);
-
-    // Call NtCreateFile now, we need to do some forgettin' before we can be done.
     NtCreateFile_Detour.call(
         file_handle,
         desired_access,
@@ -356,8 +446,71 @@ pub unsafe extern "system" fn ntcreatefile_detour(
         creation_disposition,
         create_options,
         ea_buffer,
-        ea_length
+        ea_length,
     )
+}
+
+unsafe extern "system" fn ntqueryattributesfile_detour(
+    object_attrs: *mut OBJECT_ATTRIBUTES,
+    file_information: *mut c_void,
+) -> NTSTATUS {
+    let _guard = match splice_object_attributes_path(object_attrs, "ntqueryattributesfile_detour") {
+        SpliceOutcome::Masked => return STATUS_OBJECT_NAME_NOT_FOUND,
+        SpliceOutcome::Bypass => None,
+        SpliceOutcome::Forwarded(g) => Some(g),
+    };
+
+    NtQueryAttributesFile_Detour.call(object_attrs, file_information)
+}
+
+unsafe extern "system" fn ntqueryfullattributesfile_detour(
+    object_attrs: *mut OBJECT_ATTRIBUTES,
+    file_information: *mut c_void,
+) -> NTSTATUS {
+    let _guard = match splice_object_attributes_path(object_attrs, "ntqueryfullattributesfile_detour") {
+        SpliceOutcome::Masked => return STATUS_OBJECT_NAME_NOT_FOUND,
+        SpliceOutcome::Bypass => None,
+        SpliceOutcome::Forwarded(g) => Some(g),
+    };
+
+    NtQueryFullAttributesFile_Detour.call(object_attrs, file_information)
+}
+
+unsafe extern "system" fn ntqueryinformationbyname_detour(
+    object_attrs: *mut OBJECT_ATTRIBUTES,
+    io_status_block: *mut IO_STATUS_BLOCK,
+    file_information: *mut c_void,
+    length: u32,
+    file_information_class: u32,
+) -> NTSTATUS {
+    let _guard = match splice_object_attributes_path(object_attrs, "ntqueryinformationbyname_detour") {
+        SpliceOutcome::Masked => return STATUS_OBJECT_NAME_NOT_FOUND,
+        SpliceOutcome::Bypass => None,
+        SpliceOutcome::Forwarded(g) => Some(g),
+    };
+
+    // OnceCell is populated before enable(), so .get() is always Some here.
+    NT_QUERY_INFORMATION_BY_NAME_DETOUR
+        .get()
+        .expect("ntqueryinformationbyname detour fired before OnceCell was populated")
+        .call(
+            object_attrs,
+            io_status_block,
+            file_information,
+            length,
+            file_information_class,
+        )
+}
+
+/// Resolve an ntdll export. `name` must be nul-terminated. Returns `None` if
+/// the symbol is absent.
+unsafe fn resolve_ntdll_export<T>(name: &[u8]) -> Option<T> {
+    let ntdll = GetModuleHandleW(w!("ntdll.dll"));
+    if ntdll == 0 {
+        return None;
+    }
+    let addr = GetProcAddress(ntdll, name.as_ptr())?;
+    Some(mem::transmute_copy::<_, T>(&addr))
 }
 
 unsafe extern "system" fn getfileattributesw_detour(
@@ -369,9 +522,13 @@ unsafe extern "system" fn getfileattributesw_detour(
         SetLastError(ERROR_FILE_NOT_FOUND);
         return INVALID_FILE_ATTRIBUTES;
     }
-    let new_path = remap_path(&path).unwrap_or_else(|| path.to_path_buf());
-
-    debug!("[getfileattributesw_detour] {:?} to {:?}", path, new_path);
+    let new_path = match remap_path(&path) {
+        Some(remapped) => {
+            debug!("[getfileattributesw_detour] {:?} to {:?}", path, remapped);
+            remapped
+        }
+        None => path.to_path_buf(),
+    };
 
     let wide_path = paths::path_to_widestring(&new_path);
 
@@ -397,9 +554,13 @@ unsafe extern "system" fn getfileattributesexw_detour(
         SetLastError(ERROR_FILE_NOT_FOUND);
         return 0;
     }
-    let new_path = remap_path(&path).unwrap_or_else(|| path.to_path_buf());
-
-    debug!("[getfileattributesexw_detour] {:?} to {:?}", path, new_path);
+    let new_path = match remap_path(&path) {
+        Some(remapped) => {
+            debug!("[getfileattributesexw_detour] {:?} to {:?}", path, remapped);
+            remapped
+        }
+        None => path.to_path_buf(),
+    };
 
     let wide_path = paths::path_to_widestring(&new_path);
 
@@ -468,9 +629,13 @@ unsafe extern "system" fn findfirstfilew_detour(
         SetLastError(ERROR_FILE_NOT_FOUND);
         return INVALID_HANDLE_VALUE;
     }
-    let new_path = remap_path(&path).unwrap_or_else(|| path.to_path_buf());
-
-    debug!("[findfirstfilew_detour] {:?} to {:?}", path, new_path);
+    let new_path = match remap_path(&path) {
+        Some(remapped) => {
+            debug!("[findfirstfilew_detour] {:?} to {:?}", path, remapped);
+            remapped
+        }
+        None => path.to_path_buf(),
+    };
 
     let wide_path = paths::path_to_widestring(&new_path);
 
@@ -514,9 +679,13 @@ unsafe extern "system" fn findfirstfileexw_detour(
         SetLastError(ERROR_FILE_NOT_FOUND);
         return INVALID_HANDLE_VALUE;
     }
-    let new_path = remap_path(&path).unwrap_or_else(|| path.to_path_buf());
-
-    debug!("[findfirstfileexw_detour] {:?} to {:?}", path, new_path);
+    let new_path = match remap_path(&path) {
+        Some(remapped) => {
+            debug!("[findfirstfileexw_detour] {:?} to {:?}", path, remapped);
+            remapped
+        }
+        None => path.to_path_buf(),
+    };
 
     let wide_path = paths::path_to_widestring(&new_path);
 
@@ -578,8 +747,13 @@ unsafe extern "system" fn findclose_detour(handle: HANDLE) -> BOOL {
 
 unsafe extern "system" fn loadlibraryw_detour(lpfilename: PCWSTR) -> HMODULE {
     let path = paths::pcwstr_to_path(lpfilename);
-    let new_path = remap_path(&path).unwrap_or_else(|| path.to_path_buf());
-    debug!("[loadlibraryw_detour] {:?} to {:?}", path, new_path);
+    let new_path = match remap_path(&path) {
+        Some(remapped) => {
+            debug!("[loadlibraryw_detour] {:?} to {:?}", path, remapped);
+            remapped
+        }
+        None => path.to_path_buf(),
+    };
 
     let wide_path = paths::path_to_widestring(&new_path);
 
@@ -591,8 +765,13 @@ unsafe extern "system" fn loadlibraryw_detour(lpfilename: PCWSTR) -> HMODULE {
 /// Required for experimental UE4SS debug builds. As of ed989df they use LoadLibraryExW to load their DLLs instead of LoadLibraryW
 unsafe extern "system" fn loadlibraryexw_detour(lpfilename: PCWSTR, hfile: HANDLE, dwflags: LOAD_LIBRARY_FLAGS) -> HMODULE {
     let path = paths::pcwstr_to_path(lpfilename);
-    let new_path = remap_path(&path).unwrap_or_else(|| path.to_path_buf());
-    debug!("[loadlibraryexw_detour] {:?} to {:?}", path, new_path);
+    let new_path = match remap_path(&path) {
+        Some(remapped) => {
+            debug!("[loadlibraryexw_detour] {:?} to {:?}", path, remapped);
+            remapped
+        }
+        None => path.to_path_buf(),
+    };
 
     let wide_path = paths::path_to_widestring(&new_path);
 
@@ -603,9 +782,13 @@ unsafe extern "system" fn loadlibraryexw_detour(lpfilename: PCWSTR, hfile: HANDL
 
 unsafe extern "system" fn adddlldirectory_detour(lppathnamestr: PCWSTR) -> *mut c_void {
     let path = paths::pcwstr_to_path(lppathnamestr);
-    let new_path = remap_path(&path).unwrap_or_else(|| path.to_path_buf());
-
-    debug!("[adddlldirectory_detour] {:?} to {:?}", path, new_path);
+    let new_path = match remap_path(&path) {
+        Some(remapped) => {
+            debug!("[adddlldirectory_detour] {:?} to {:?}", path, remapped);
+            remapped
+        }
+        None => path.to_path_buf(),
+    };
 
     let wide_path = paths::path_to_widestring(&new_path);
     let raw_path = wide_path.as_ptr();
