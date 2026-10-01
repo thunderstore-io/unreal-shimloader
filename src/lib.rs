@@ -3,6 +3,9 @@
     clippy::pedantic,
     clippy::unwrap_used,
 )]
+// `static_detour!` expands recursively per entry; the NtQuery* additions
+// push past Rust's default 128 budget.
+#![recursion_limit = "256"]
 
 use std::{env, thread, fs};
 use std::io::Write;
