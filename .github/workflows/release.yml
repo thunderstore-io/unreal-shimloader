@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 defaults:
   run:
@@ -15,6 +16,7 @@ defaults:
 jobs:
   release:
     runs-on: windows-latest
+    environment: unreal-shimloader
     steps:
       - uses: actions/checkout@v4
 
@@ -45,28 +47,47 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
+      - name: Authenticate with Pulumi Cloud
+        uses: pulumi/auth-actions@v2
+        with:
+          organization: Riskidev
+          requested-token-type: urn:pulumi:token-type:access_token:team
+          scope: team:unreal-shimloader
+
+      - name: Load code-signing secrets
+        uses: pulumi/esc-action@v3
+        with:
+          environment: Riskidev/thunderstore-io/code-signing
+          export-environment-variables: SM_HOST,SM_API_KEY,SM_CLIENT_CERT_PASSWORD,SM_CLIENT_CERT_FILE_B64,SM_KEYPAIR_ALIAS
+
+      - name: Check code-signing secrets
+        run: |
+          missing=0
+          for name in SM_HOST SM_API_KEY SM_CLIENT_CERT_PASSWORD SM_CLIENT_CERT_FILE_B64 SM_KEYPAIR_ALIAS; do
+              if [[ -z "${!name:-}" ]]; then
+                  echo "ESC did not inject $name." >&2
+                  missing=1
+              fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+              echo "Confirm Riskidev/thunderstore-io/code-signing exports those environmentVariables." >&2
+              exit 1
+          fi
+
       - name: Decode signing cert
-        env:
-          SM_CLIENT_CERT_FILE_B64: ${{ secrets.SM_CLIENT_CERT_FILE_B64 }}
         run: echo "$SM_CLIENT_CERT_FILE_B64" | base64 --decode > "$RUNNER_TEMP/Certificate_pkcs12.p12"
 
       - name: Install DigiCert SSM tools
         uses: digicert/ssm-code-signing@v1.1.0
         env:
-          SM_HOST: ${{ secrets.SM_HOST }}
-          SM_API_KEY: ${{ secrets.SM_API_KEY }}
           SM_CLIENT_CERT_FILE: ${{ runner.temp }}/Certificate_pkcs12.p12
-          SM_CLIENT_CERT_PASSWORD: ${{ secrets.SM_CLIENT_CERT_PASSWORD }}
 
       - name: Sign dwmapi.dll
         env:
-          SM_HOST: ${{ secrets.SM_HOST }}
-          SM_API_KEY: ${{ secrets.SM_API_KEY }}
           SM_CLIENT_CERT_FILE: ${{ runner.temp }}/Certificate_pkcs12.p12
-          SM_CLIENT_CERT_PASSWORD: ${{ secrets.SM_CLIENT_CERT_PASSWORD }}
         run: |
           smctl sign \
-              --keypair-alias "${{ secrets.SM_KEYPAIR_ALIAS }}" \
+              --keypair-alias "$SM_KEYPAIR_ALIAS" \
               --input "target/release/dwmapi.dll" \
               --verbose
           smctl sign verify --input "target/release/dwmapi.dll"
